@@ -4,97 +4,9 @@
 #include <string.h>
 #include <time.h>
 #include <windows.h>
-
-void simple_disassemble_text_section(FILE* file, DWORD section_offset, WORD number_of_sections) {
-    IMAGE_SECTION_HEADER section;
-    int i;
-    unsigned char* code;
-    DWORD addr;
-    DWORD j;
-    unsigned char b;
-    
-    for (i = 0; i < number_of_sections; i++) {
-        fseek(file, section_offset + i * sizeof(IMAGE_SECTION_HEADER), SEEK_SET);
-        fread(&section, sizeof(IMAGE_SECTION_HEADER), 1, file);
-        if (memcmp(section.Name, ".text", 5) == 0) {
-            printf("=== .text ã‚»ã‚¯ã‚·ãƒ§ãƒ³ ç°¡æ˜“é€†ã‚¢ã‚»ãƒ³ãƒ–ãƒ« ===\n");
-            code = malloc(section.SizeOfRawData);
-            fseek(file, section.PointerToRawData, SEEK_SET);
-            fread(code, 1, section.SizeOfRawData, file);
-            addr = section.VirtualAddress;
-            for (j = 0; j < section.SizeOfRawData; ) {
-                printf("%08X: ", addr + j);
-                b = code[j];
-                
-                // å¢ƒç•Œãƒã‚§ãƒƒã‚¯ä»˜ãã®å®‰å…¨ãªé€†ã‚¢ã‚»ãƒ³ãƒ–ãƒ«
-                if (b == 0xC3) { 
-                    printf("RET\n"); 
-                    j += 1; 
-                }
-                else if (b == 0xE8) { 
-                    if (j + 4 < section.SizeOfRawData) {
-                        printf("CALL 0x%02X%02X%02X%02X\n", code[j+4], code[j+3], code[j+2], code[j+1]); 
-                        j += 5; 
-                    } else {
-                        printf("CALL (ä¸å®Œå…¨)\n");
-                        j += 1;
-                    }
-                }
-                else if (b == 0xE9) { 
-                    if (j + 4 < section.SizeOfRawData) {
-                        printf("JMP 0x%02X%02X%02X%02X\n", code[j+4], code[j+3], code[j+2], code[j+1]); 
-                        j += 5; 
-                    } else {
-                        printf("JMP (ä¸å®Œå…¨)\n");
-                        j += 1;
-                    }
-                }
-                else if (b == 0xEB) { 
-                    if (j + 1 < section.SizeOfRawData) {
-                        printf("JMP SHORT 0x%02X\n", code[j+1]); 
-                        j += 2; 
-                    } else {
-                        printf("JMP SHORT (ä¸å®Œå…¨)\n");
-                        j += 1;
-                    }
-                }
-                else if (b == 0x90) { 
-                    printf("NOP\n"); 
-                    j += 1; 
-                }
-                else if ((b & 0xF0) == 0xB0) { 
-                    if (j + 1 < section.SizeOfRawData) {
-                        printf("MOV AL, 0x%02X\n", code[j+1]); 
-                        j += 2; 
-                    } else {
-                        printf("MOV AL (ä¸å®Œå…¨)\n");
-                        j += 1;
-                    }
-                }
-                else if ((b & 0xF8) == 0xB8) { 
-                    if (j + 4 < section.SizeOfRawData) {
-                        printf("MOV EAX, 0x%02X%02X%02X%02X\n", code[j+4], code[j+3], code[j+2], code[j+1]); 
-                        j += 5; 
-                    } else {
-                        printf("MOV EAX (ä¸å®Œå…¨)\n");
-                        j += 1;
-                    }
-                }
-                else { 
-                    printf("DB 0x%02X\n", b); 
-                    j += 1; 
-                }
-                
-                // å®‰å…¨ãƒã‚§ãƒƒã‚¯ï¼šjãŒé€²æ­©ã—ãªã„å ´åˆã®å¼·åˆ¶çµ‚äº†
-                if (j >= section.SizeOfRawData) {
-                    break;
-                }
-            }
-            free(code);
-            break;
-        }
-    }
-}
+#include <stdint.h>
+#include <inttypes.h>
+#include <capstone/capstone.h>
 
 void dump_text_section_bytes(FILE* file, DWORD section_offset, WORD number_of_sections) {
     IMAGE_SECTION_HEADER section;
@@ -105,10 +17,18 @@ void dump_text_section_bytes(FILE* file, DWORD section_offset, WORD number_of_se
         if (memcmp(section.Name, ".text", 5) == 0) {
             unsigned char* code;
             DWORD j;
-            printf("=== .text ã‚»ã‚¯ã‚·ãƒ§ãƒ³ ãƒã‚¤ãƒˆãƒ€ãƒ³ãƒ— ===\n");
+            printf("=== .text ƒZƒNƒVƒ‡ƒ“ ƒoƒCƒgƒ_ƒ“ƒv ===\n");
             code = malloc(section.SizeOfRawData);
+            if (code == NULL) {
+                fprintf(stderr, "ƒƒ‚ƒŠŠm•Û‚É¸”s‚µ‚Ü‚µ‚½\n");
+                return;
+            }
             fseek(file, section.PointerToRawData, SEEK_SET);
-            fread(code, 1, section.SizeOfRawData, file);
+            if (fread(code, 1, section.SizeOfRawData, file) != section.SizeOfRawData) {
+                fprintf(stderr, "ƒf[ƒ^“Ç‚İ‚İ‚É¸”s‚µ‚Ü‚µ‚½\n");
+                free(code);
+                return;
+            }
             for (j = 0; j < section.SizeOfRawData; j++) {
                 if (j % 16 == 0) printf("\n%08X: ", section.VirtualAddress + j);
                 printf("%02X ", code[j]);
@@ -120,474 +40,69 @@ void dump_text_section_bytes(FILE* file, DWORD section_offset, WORD number_of_se
     }
 }
 
-// x86å‘½ä»¤ã®è©³ç´°ãªé€†ã‚¢ã‚»ãƒ³ãƒ–ãƒ«ï¼ˆå‡ºåŠ›åˆ¶é™ä»˜ãï¼‰
-void disassemble_text_section(FILE* file, DWORD section_offset, WORD number_of_sections) {
-    const DWORD MAX_INSTRUCTIONS = 100; // æœ€å¤§è¡¨ç¤ºå‘½ä»¤æ•°ã‚’å‰Šæ¸›ï¼ˆå®‰å…¨å¯¾ç­–ï¼‰
+void disassemble_text_section_capstone(FILE* file, DWORD section_offset, WORD number_of_sections, uint64_t image_base, int is_64bit) {
     IMAGE_SECTION_HEADER section;
     int i;
     for (i = 0; i < number_of_sections; i++) {
         fseek(file, section_offset + i * sizeof(IMAGE_SECTION_HEADER), SEEK_SET);
         fread(&section, sizeof(IMAGE_SECTION_HEADER), 1, file);
-        
         if (memcmp(section.Name, ".text", 5) == 0) {
-            printf("=== .text ã‚»ã‚¯ã‚·ãƒ§ãƒ³ è©³ç´°é€†ã‚¢ã‚»ãƒ³ãƒ–ãƒ« ===\n");
-            printf("ä»®æƒ³ã‚¢ãƒ‰ãƒ¬ã‚¹: 0x%08X\n", section.VirtualAddress);
-            printf("ã‚µã‚¤ã‚º: 0x%08X ãƒã‚¤ãƒˆ\n", section.SizeOfRawData);
-            printf("ãƒ•ã‚¡ã‚¤ãƒ«å†…ã‚ªãƒ•ã‚»ãƒƒãƒˆ: 0x%08X\n\n", section.PointerToRawData);
-            
-            unsigned char* code = malloc(section.SizeOfRawData);
+            unsigned char* code = (unsigned char*)malloc(section.SizeOfRawData);
             if (!code) {
-                printf("ã‚¨ãƒ©ãƒ¼: ãƒ¡ãƒ¢ãƒªå‰²ã‚Šå½“ã¦ã«å¤±æ•—ã—ã¾ã—ãŸ\n");
+                fprintf(stderr, "ƒƒ‚ƒŠŠm•Û‚É¸”s‚µ‚Ü‚µ‚½\n");
                 return;
             }
-            
-            fseek(file, section.PointerToRawData, SEEK_SET);
-            fread(code, 1, section.SizeOfRawData, file);
-            
-            DWORD base_addr;
-            DWORD pos;
-            DWORD instruction_count;
-            int bytes_shown;
-            int instruction_len;
-            unsigned char opcode;
-            DWORD old_pos;
-            
-            base_addr = section.VirtualAddress;
-            pos = 0;
-            instruction_count = 0;
-            
-            while (pos < section.SizeOfRawData && instruction_count < MAX_INSTRUCTIONS) {
-                // è¿½åŠ ã®å®‰å…¨ãƒã‚§ãƒƒã‚¯ï¼šposãŒç¯„å›²å¤–ã®å ´åˆã¯å¼·åˆ¶çµ‚äº†
-                if (pos >= section.SizeOfRawData) {
-                    break;
-                }
-                
-                printf("%08X: ", base_addr + pos);
-                
-                // ãƒã‚¤ãƒˆè¡¨ç¤ºï¼ˆæœ€å¤§8ãƒã‚¤ãƒˆï¼‰
-                bytes_shown = 0;
-                instruction_len = 1; // ãƒ‡ãƒ•ã‚©ãƒ«ãƒˆå€¤ã‚’1ã«è¨­å®šï¼ˆå®‰å…¨å¯¾ç­–ï¼‰
-                old_pos = pos; // é€²æ—ãƒã‚§ãƒƒã‚¯ç”¨
-                
-                opcode = code[pos];
-                
-                // å‘½ä»¤é•·ã®åˆ¤å®šã¨é€†ã‚¢ã‚»ãƒ³ãƒ–ãƒ«
-                if (opcode == 0x90) {
-                    printf("90           NOP\n");
-                    instruction_len = 1;
-                }
-                else if (opcode == 0xC3) {
-                    printf("C3           RET\n");
-                    instruction_len = 1;
-                }
-                else if (opcode == 0xCC) {
-                    printf("CC           INT3\n");
-                    instruction_len = 1;
-                }
-                else if (opcode == 0xE8) {
-                    // CALL rel32
-                    if (pos + 4 < section.SizeOfRawData) {
-                        DWORD offset;
-                        offset = *(DWORD*)(code + pos + 1);
-                        printf("E8 %02X %02X %02X %02X CALL 0x%08X\n", 
-                               code[pos+1], code[pos+2], code[pos+3], code[pos+4],
-                               base_addr + pos + 5 + (int)offset);
-                        instruction_len = 5;
-                    } else {
-                        printf("E8           CALL (ä¸å®Œå…¨)\n");
-                        instruction_len = 1;
-                    }
-                }
-                else if (opcode == 0xE9) {
-                    // JMP rel32
-                    if (pos + 4 < section.SizeOfRawData) {
-                        DWORD offset;
-                        offset = *(DWORD*)(code + pos + 1);
-                        printf("E9 %02X %02X %02X %02X JMP 0x%08X\n", 
-                               code[pos+1], code[pos+2], code[pos+3], code[pos+4],
-                               base_addr + pos + 5 + (int)offset);
-                        instruction_len = 5;
-                    } else {
-                        printf("E9           JMP (ä¸å®Œå…¨)\n");
-                        instruction_len = 1;
-                    }
-                }
-                else if (opcode == 0xEB) {
-                    // JMP rel8
-                    if (pos + 1 < section.SizeOfRawData) {
-                        signed char offset;
-                        offset = (signed char)code[pos + 1];
-                        printf("EB %02X        JMP SHORT 0x%08X\n", 
-                               code[pos+1], base_addr + pos + 2 + offset);
-                        instruction_len = 2;
-                    } else {
-                        printf("EB           JMP SHORT (ä¸å®Œå…¨)\n");
-                        instruction_len = 1;
-                    }
-                }
-                else if ((opcode & 0xF8) == 0x50) {
-                    // PUSH reg32
-                    printf("%02X           PUSH %s\n", opcode, 
-                           (opcode == 0x50) ? "EAX" : (opcode == 0x51) ? "ECX" : 
-                           (opcode == 0x52) ? "EDX" : (opcode == 0x53) ? "EBX" :
-                           (opcode == 0x54) ? "ESP" : (opcode == 0x55) ? "EBP" :
-                           (opcode == 0x56) ? "ESI" : "EDI");
-                    instruction_len = 1;
-                }
-                else if ((opcode & 0xF8) == 0x58) {
-                    // POP reg32
-                    printf("%02X           POP %s\n", opcode,
-                           (opcode == 0x58) ? "EAX" : (opcode == 0x59) ? "ECX" : 
-                           (opcode == 0x5A) ? "EDX" : (opcode == 0x5B) ? "EBX" :
-                           (opcode == 0x5C) ? "ESP" : (opcode == 0x5D) ? "EBP" :
-                           (opcode == 0x5E) ? "ESI" : "EDI");
-                    instruction_len = 1;
-                }
-                else if ((opcode & 0xF8) == 0xB8) {
-                    // MOV reg32, imm32
-                    if (pos + 4 < section.SizeOfRawData) {
-                        DWORD imm;
-                        imm = *(DWORD*)(code + pos + 1);
-                        printf("%02X %02X %02X %02X %02X MOV %s, 0x%08X\n", 
-                               opcode, code[pos+1], code[pos+2], code[pos+3], code[pos+4],
-                               (opcode == 0xB8) ? "EAX" : (opcode == 0xB9) ? "ECX" : 
-                               (opcode == 0xBA) ? "EDX" : (opcode == 0xBB) ? "EBX" :
-                               (opcode == 0xBC) ? "ESP" : (opcode == 0xBD) ? "EBP" :
-                               (opcode == 0xBE) ? "ESI" : "EDI", imm);
-                        instruction_len = 5;
-                    } else {
-                        printf("%02X           MOV (ä¸å®Œå…¨)\n", opcode);
-                        instruction_len = 1;
-                    }
-                }
-                else if (opcode == 0x8B) {
-                    // MOV reg, r/m (ç°¡æ˜“ç‰ˆ)
-                    if (pos + 1 < section.SizeOfRawData) {
-                        unsigned char modrm;
-                        modrm = code[pos + 1];
-                        printf("%02X %02X        MOV (ModR/M: 0x%02X)\n", opcode, modrm, modrm);
-                        instruction_len = 2;
-                    } else {
-                        printf("%02X           MOV (ä¸å®Œå…¨)\n", opcode);
-                        instruction_len = 1;
-                    }
-                }
-                else if (opcode == 0x89) {
-                    // MOV r/m, reg (ç°¡æ˜“ç‰ˆ)
-                    if (pos + 1 < section.SizeOfRawData) {
-                        unsigned char modrm;
-                        modrm = code[pos + 1];
-                        printf("%02X %02X        MOV (ModR/M: 0x%02X)\n", opcode, modrm, modrm);
-                        instruction_len = 2;
-                    } else {
-                        printf("%02X           MOV (ä¸å®Œå…¨)\n", opcode);
-                        instruction_len = 1;
-                    }
-                }
-                else if (opcode == 0x83) {
-                    // ç®—è¡“æ¼”ç®— imm8
-                    if (pos + 2 < section.SizeOfRawData) {
-                        unsigned char modrm;
-                        unsigned char imm8;
-                        modrm = code[pos + 1];
-                        imm8 = code[pos + 2];
-                        printf("%02X %02X %02X     ADD/OR/ADC/SBB/AND/SUB/XOR/CMP (ModR/M: 0x%02X, imm8: 0x%02X)\n", 
-                               opcode, modrm, imm8, modrm, imm8);
-                        instruction_len = 3;
-                    } else {
-                        printf("%02X           ç®—è¡“æ¼”ç®— (ä¸å®Œå…¨)\n", opcode);
-                        instruction_len = 1;
-                    }
-                }
-                else if (opcode == 0x74) {
-                    // JZ/JE rel8
-                    if (pos + 1 < section.SizeOfRawData) {
-                        signed char offset;
-                        offset = (signed char)code[pos + 1];
-                        printf("74 %02X        JZ 0x%08X\n", 
-                               code[pos+1], base_addr + pos + 2 + offset);
-                        instruction_len = 2;
-                    } else {
-                        printf("74           JZ (ä¸å®Œå…¨)\n");
-                        instruction_len = 1;
-                    }
-                }
-                else if (opcode == 0x75) {
-                    // JNZ/JNE rel8
-                    if (pos + 1 < section.SizeOfRawData) {
-                        signed char offset;
-                        offset = (signed char)code[pos + 1];
-                        printf("75 %02X        JNZ 0x%08X\n", 
-                               code[pos+1], base_addr + pos + 2 + offset);
-                        instruction_len = 2;
-                    } else {
-                        printf("75           JNZ (ä¸å®Œå…¨)\n");
-                        instruction_len = 1;
-                    }
-                }
-                else if (opcode == 0x72) {
-                    // JB/JC rel8
-                    if (pos + 1 < section.SizeOfRawData) {
-                        signed char offset;
-                        offset = (signed char)code[pos + 1];
-                        printf("72 %02X        JB 0x%08X\n", 
-                               code[pos+1], base_addr + pos + 2 + offset);
-                        instruction_len = 2;
-                    } else {
-                        printf("72           JB (ä¸å®Œå…¨)\n");
-                        instruction_len = 1;
-                    }
-                }
-                else if (opcode == 0x73) {
-                    // JAE/JNC rel8
-                    if (pos + 1 < section.SizeOfRawData) {
-                        signed char offset;
-                        offset = (signed char)code[pos + 1];
-                        printf("73 %02X        JAE 0x%08X\n", 
-                               code[pos+1], base_addr + pos + 2 + offset);
-                        instruction_len = 2;
-                    } else {
-                        printf("73           JAE (ä¸å®Œå…¨)\n");
-                        instruction_len = 1;
-                    }
-                }
-                else if (opcode == 0x76) {
-                    // JBE/JNA rel8
-                    if (pos + 1 < section.SizeOfRawData) {
-                        signed char offset;
-                        offset = (signed char)code[pos + 1];
-                        printf("76 %02X        JBE 0x%08X\n", 
-                               code[pos+1], base_addr + pos + 2 + offset);
-                        instruction_len = 2;
-                    } else {
-                        printf("76           JBE (ä¸å®Œå…¨)\n");
-                        instruction_len = 1;
-                    }
-                }
-                else if (opcode == 0x77) {
-                    // JA/JNBE rel8
-                    if (pos + 1 < section.SizeOfRawData) {
-                        signed char offset;
-                        offset = (signed char)code[pos + 1];
-                        printf("77 %02X        JA 0x%08X\n", 
-                               code[pos+1], base_addr + pos + 2 + offset);
-                        instruction_len = 2;
-                    } else {
-                        printf("77           JA (ä¸å®Œå…¨)\n");
-                        instruction_len = 1;
-                    }
-                }
-                else if (opcode == 0x78) {
-                    // JS rel8
-                    if (pos + 1 < section.SizeOfRawData) {
-                        signed char offset;
-                        offset = (signed char)code[pos + 1];
-                        printf("78 %02X        JS 0x%08X\n", 
-                               code[pos+1], base_addr + pos + 2 + offset);
-                        instruction_len = 2;
-                    } else {
-                        printf("78           JS (ä¸å®Œå…¨)\n");
-                        instruction_len = 1;
-                    }
-                }
-                else if (opcode == 0x79) {
-                    // JNS rel8
-                    if (pos + 1 < section.SizeOfRawData) {
-                        signed char offset = (signed char)code[pos + 1];
-                        printf("79 %02X        JNS 0x%08X\n", 
-                               code[pos+1], base_addr + pos + 2 + offset);
-                        instruction_len = 2;
-                    } else {
-                        printf("79           JNS (ä¸å®Œå…¨)\n");
-                        instruction_len = 1;
-                    }
-                }
-                else if (opcode == 0x7C) {
-                    // JL/JNGE rel8
-                    if (pos + 1 < section.SizeOfRawData) {
-                        signed char offset = (signed char)code[pos + 1];
-                        printf("7C %02X        JL 0x%08X\n", 
-                               code[pos+1], base_addr + pos + 2 + offset);
-                        instruction_len = 2;
-                    } else {
-                        printf("7C           JL (ä¸å®Œå…¨)\n");
-                        instruction_len = 1;
-                    }
-                }
-                else if (opcode == 0x7D) {
-                    // JGE/JNL rel8
-                    if (pos + 1 < section.SizeOfRawData) {
-                        signed char offset = (signed char)code[pos + 1];
-                        printf("7D %02X        JGE 0x%08X\n", 
-                               code[pos+1], base_addr + pos + 2 + offset);
-                        instruction_len = 2;
-                    } else {
-                        printf("7D           JGE (ä¸å®Œå…¨)\n");
-                        instruction_len = 1;
-                    }
-                }
-                else if (opcode == 0x7E) {
-                    // JLE/JNG rel8
-                    if (pos + 1 < section.SizeOfRawData) {
-                        signed char offset = (signed char)code[pos + 1];
-                        printf("7E %02X        JLE 0x%08X\n", 
-                               code[pos+1], base_addr + pos + 2 + offset);
-                        instruction_len = 2;
-                    } else {
-                        printf("7E           JLE (ä¸å®Œå…¨)\n");
-                        instruction_len = 1;
-                    }
-                }
-                else if (opcode == 0x7F) {
-                    // JG/JNLE rel8
-                    if (pos + 1 < section.SizeOfRawData) {
-                        signed char offset = (signed char)code[pos + 1];
-                        printf("7F %02X        JG 0x%08X\n", 
-                               code[pos+1], base_addr + pos + 2 + offset);
-                        instruction_len = 2;
-                    } else {
-                        printf("7F           JG (ä¸å®Œå…¨)\n");
-                        instruction_len = 1;
-                    }
-                }
-                else if (opcode == 0x68) {
-                    // PUSH imm32
-                    if (pos + 4 < section.SizeOfRawData) {
-                        DWORD imm = *(DWORD*)(code + pos + 1);
-                        printf("68 %02X %02X %02X %02X PUSH 0x%08X\n", 
-                               code[pos+1], code[pos+2], code[pos+3], code[pos+4], imm);
-                        instruction_len = 5;
-                    } else {
-                        printf("68           PUSH (ä¸å®Œå…¨)\n");
-                        instruction_len = 1;
-                    }
-                }
-                else if (opcode == 0x6A) {
-                    // PUSH imm8
-                    if (pos + 1 < section.SizeOfRawData) {
-                        unsigned char imm8 = code[pos + 1];
-                        printf("6A %02X        PUSH 0x%02X\n", imm8, imm8);
-                        instruction_len = 2;
-                    } else {
-                        printf("6A           PUSH (ä¸å®Œå…¨)\n");
-                        instruction_len = 1;
-                    }
-                }
-                else if (opcode == 0x85) {
-                    // TEST reg, r/m
-                    if (pos + 1 < section.SizeOfRawData) {
-                        unsigned char modrm = code[pos + 1];
-                        printf("85 %02X        TEST (ModR/M: 0x%02X)\n", modrm, modrm);
-                        instruction_len = 2;
-                    } else {
-                        printf("85           TEST (ä¸å®Œå…¨)\n");
-                        instruction_len = 1;
-                    }
-                }
-                else if (opcode == 0x3B) {
-                    // CMP reg, r/m
-                    if (pos + 1 < section.SizeOfRawData) {
-                        unsigned char modrm = code[pos + 1];
-                        printf("3B %02X        CMP (ModR/M: 0x%02X)\n", modrm, modrm);
-                        instruction_len = 2;
-                    } else {
-                        printf("3B           CMP (ä¸å®Œå…¨)\n");
-                        instruction_len = 1;
-                    }
-                }
-                else if (opcode == 0x39) {
-                    // CMP r/m, reg
-                    if (pos + 1 < section.SizeOfRawData) {
-                        unsigned char modrm = code[pos + 1];
-                        printf("39 %02X        CMP (ModR/M: 0x%02X)\n", modrm, modrm);
-                        instruction_len = 2;
-                    } else {
-                        printf("39           CMP (ä¸å®Œå…¨)\n");
-                        instruction_len = 1;
-                    }
-                }
-                else if (opcode == 0x01) {
-                    // ADD r/m, reg
-                    if (pos + 1 < section.SizeOfRawData) {
-                        unsigned char modrm = code[pos + 1];
-                        printf("01 %02X        ADD (ModR/M: 0x%02X)\n", modrm, modrm);
-                        instruction_len = 2;
-                    } else {
-                        printf("01           ADD (ä¸å®Œå…¨)\n");
-                        instruction_len = 1;
-                    }
-                }
-                else if (opcode == 0x03) {
-                    // ADD reg, r/m
-                    if (pos + 1 < section.SizeOfRawData) {
-                        unsigned char modrm = code[pos + 1];
-                        printf("03 %02X        ADD (ModR/M: 0x%02X)\n", modrm, modrm);
-                        instruction_len = 2;
-                    } else {
-                        printf("03           ADD (ä¸å®Œå…¨)\n");
-                        instruction_len = 1;
-                    }
-                }
-                else if (opcode == 0x29) {
-                    // SUB r/m, reg
-                    if (pos + 1 < section.SizeOfRawData) {
-                        unsigned char modrm = code[pos + 1];
-                        printf("29 %02X        SUB (ModR/M: 0x%02X)\n", modrm, modrm);
-                        instruction_len = 2;
-                    } else {
-                        printf("29           SUB (ä¸å®Œå…¨)\n");
-                        instruction_len = 1;
-                    }
-                }
-                else if (opcode == 0x2B) {
-                    // SUB reg, r/m
-                    if (pos + 1 < section.SizeOfRawData) {
-                        unsigned char modrm = code[pos + 1];
-                        printf("2B %02X        SUB (ModR/M: 0x%02X)\n", modrm, modrm);
-                        instruction_len = 2;
-                    } else {
-                        printf("2B           SUB (ä¸å®Œå…¨)\n");
-                        instruction_len = 1;
-                    }
-                }
-                else {
-                    // ä¸æ˜ãªå‘½ä»¤
-                    printf("%02X           DB 0x%02X\n", opcode, opcode);
-                    instruction_len = 1;
-                }
-                
-                // å®‰å…¨ãƒã‚§ãƒƒã‚¯ï¼šinstruction_lenãŒ0ã®å ´åˆã¯å¼·åˆ¶çš„ã«1ã«ã™ã‚‹
-                if (instruction_len <= 0) {
-                    printf("WARNING: Invalid instruction length, forcing to 1\n");
-                    instruction_len = 1;
-                }
-                
-                // posã‚’é€²ã‚ã‚‹å‰ã«æœ€çµ‚ãƒã‚§ãƒƒã‚¯
-                pos += instruction_len;
-                instruction_count++;
-                
-                // ç„¡é™ãƒ«ãƒ¼ãƒ—é˜²æ­¢ï¼šposãŒé€²æ­©ã—ã¦ã„ãªã„å ´åˆã¯å¼·åˆ¶çµ‚äº†
-                if (pos <= old_pos) {
-                    printf("ERROR: Position not advancing (pos=%d, old_pos=%d), breaking loop\n", pos, old_pos);
-                    break;
-                }
-                
-                // è¿½åŠ ã®å®‰å…¨ãƒã‚§ãƒƒã‚¯ï¼šposãŒç¯„å›²ã‚’è¶…ãˆãŸå ´åˆ
-                if (pos > section.SizeOfRawData) {
-                    break;
-                }
-                
-                // ç·Šæ€¥ãƒ–ãƒ¬ãƒ¼ã‚­ï¼šinstruction_countãŒç•°å¸¸ã«å¤§ãããªã£ãŸå ´åˆ
-                if (instruction_count > MAX_INSTRUCTIONS * 2) {
-                    printf("ERROR: Instruction count exceeded safety limit, breaking loop\n");
-                    break;
-                }
+            if (fseek(file, section.PointerToRawData, SEEK_SET) != 0 ||
+                fread(code, 1, section.SizeOfRawData, file) != section.SizeOfRawData) {
+                fprintf(stderr, "ƒf[ƒ^“Ç‚İ‚İ‚É¸”s‚µ‚Ü‚µ‚½\n");
+                free(code);
+                return;
             }
-            
-            if (instruction_count >= MAX_INSTRUCTIONS) {
-                printf("... (å‡ºåŠ›ã‚’%då‘½ä»¤ã§åˆ¶é™ã—ã¾ã—ãŸã€‚å…¨ä½“: %d ãƒã‚¤ãƒˆ)\n", MAX_INSTRUCTIONS, section.SizeOfRawData);
+
+            printf("=== .text ƒZƒNƒVƒ‡ƒ“ ‹tƒAƒZƒ“ƒuƒ‹ (Capstone) ===\n");
+            uint64_t start_va = image_base + (uint64_t)section.VirtualAddress;
+            printf("RVA: 0x%08X  ŠJnVA: 0x%016llX  ƒTƒCƒY: 0x%08X  ƒIƒtƒZƒbƒg: 0x%08X\n\n",
+                   section.VirtualAddress, (unsigned long long)start_va, section.SizeOfRawData, section.PointerToRawData);
+
+            csh handle;
+            cs_insn* insn = NULL;
+            cs_err err;
+            cs_mode mode = is_64bit ? CS_MODE_64 : CS_MODE_32;
+            err = cs_open(CS_ARCH_X86, mode, &handle);
+            if (err != CS_ERR_OK) {
+                fprintf(stderr, "Capstone‰Šú‰»‚É¸”s‚µ‚Ü‚µ‚½: %d\n", err);
+                free(code);
+                return;
             }
-            
+            cs_option(handle, CS_OPT_DETAIL, CS_OPT_OFF);
+
+            size_t count = cs_disasm(handle, code, section.SizeOfRawData,
+                                     start_va, 0, &insn);
+            if (count > 0) {
+                for (size_t j = 0; j < count; j++) {
+                    // ƒAƒhƒŒƒX
+                    printf("0x%016" PRIx64 ": ", (uint64_t)insn[j].address);
+                    // –½—ßƒoƒCƒgiÅ‘å10ƒoƒCƒg•\¦A??–„‚ß???
+                    int byte_count = (int)insn[j].size;
+                    if (byte_count > 10) byte_count = 10;
+                    for (int b = 0; b < byte_count; b++) {
+                        printf("%02X ", insn[j].bytes[b]);
+                    }
+                    // ƒpƒfƒBƒ“ƒO???10ƒoƒCƒg???‚Ì??: 3*10=30???
+                    for (int p = byte_count; p < 10; p++) {
+                        printf("   ");
+                    }
+                    // –½—ß
+                    if (insn[j].op_str && insn[j].op_str[0])
+                        printf("  %s %s\n", insn[j].mnemonic, insn[j].op_str);
+                    else
+                        printf("  %s\n", insn[j].mnemonic);
+                }
+                cs_free(insn, count);
+            } else {
+                printf("??ƒAƒZƒ“ƒuƒ‹‚É¸”s‚µ‚Ü‚µ‚½??\n");
+            }
+            cs_close(&handle);
             printf("\n");
             free(code);
             break;
@@ -595,10 +110,12 @@ void disassemble_text_section(FILE* file, DWORD section_offset, WORD number_of_s
     }
 }
 
+
+
 void print_section_headers(FILE* file, DWORD section_offset, WORD number_of_sections) {
     printf("=== Section Headers ===\n");
     IMAGE_SECTION_HEADER section;
-    // ã‚»ã‚¯ã‚·ãƒ§ãƒ³åã®æœ€å¤§é•·ã¯8æ–‡å­—
+    // ƒZƒNƒVƒ‡ƒ“–¼???Å‘å’·‚Í8????
     char name[9];
     int i;
     for (i = 0; i < number_of_sections; i++) {
@@ -668,7 +185,7 @@ void print_file_header(IMAGE_FILE_HEADER* file_header) {
     }
     printf(")\n");
     printf("NumberOfSections:     %d\n", file_header->NumberOfSections);
-    // TimeDateStampã‚’æ—¥æœ¬æ™‚é–“ã§è¡¨ç¤º
+    // TimeDateStamp‚ğ“ú–{ŠÔ‚Å•\¦
     time_t timestamp = (time_t)file_header->TimeDateStamp;
     struct tm local_tm;
     localtime_s(&local_tm, &timestamp);
@@ -774,70 +291,174 @@ void print_data_directories(IMAGE_DATA_DIRECTORY* data_dirs, DWORD count) {
     printf("\n");
 }
 
+void print_optional_header64(IMAGE_OPTIONAL_HEADER64* opt_header) {
+    printf("=== Optional Header (64bit) ===\n");
+    printf("Magic:                    0x%04X (%s)\n", opt_header->Magic,
+           opt_header->Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC ? "PE32+" : "Unknown");
+    printf("MajorLinkerVersion:       %d\n", opt_header->MajorLinkerVersion);
+    printf("MinorLinkerVersion:       %d\n", opt_header->MinorLinkerVersion);
+    printf("SizeOfCode:               0x%08X (%d bytes)\n", opt_header->SizeOfCode, opt_header->SizeOfCode);
+    printf("SizeOfInitializedData:    0x%08X (%d bytes)\n", opt_header->SizeOfInitializedData, opt_header->SizeOfInitializedData);
+    printf("SizeOfUninitializedData:  0x%08X (%d bytes)\n", opt_header->SizeOfUninitializedData, opt_header->SizeOfUninitializedData);
+    printf("AddressOfEntryPoint:      0x%08X\n", opt_header->AddressOfEntryPoint);
+    printf("BaseOfCode:               0x%08X\n", opt_header->BaseOfCode);
+    printf("ImageBase:                0x%016llX\n", (unsigned long long)opt_header->ImageBase);
+    printf("SectionAlignment:         0x%08X\n", opt_header->SectionAlignment);
+    printf("FileAlignment:            0x%08X\n", opt_header->FileAlignment);
+    printf("MajorOperatingSystemVersion: %d\n", opt_header->MajorOperatingSystemVersion);
+    printf("MinorOperatingSystemVersion: %d\n", opt_header->MinorOperatingSystemVersion);
+    printf("MajorImageVersion:        %d\n", opt_header->MajorImageVersion);
+    printf("MinorImageVersion:        %d\n", opt_header->MinorImageVersion);
+    printf("MajorSubsystemVersion:    %d\n", opt_header->MajorSubsystemVersion);
+    printf("MinorSubsystemVersion:    %d\n", opt_header->MinorSubsystemVersion);
+    printf("SizeOfImage:              0x%08X (%d bytes)\n", opt_header->SizeOfImage, opt_header->SizeOfImage);
+    printf("SizeOfHeaders:            0x%08X (%d bytes)\n", opt_header->SizeOfHeaders, opt_header->SizeOfHeaders);
+    printf("CheckSum:                 0x%08X\n", opt_header->CheckSum);
+    printf("Subsystem:                %d (", opt_header->Subsystem);
+    switch(opt_header->Subsystem) {
+        case IMAGE_SUBSYSTEM_NATIVE:
+            printf("Native");
+            break;
+        case IMAGE_SUBSYSTEM_WINDOWS_GUI:
+            printf("Windows GUI");
+            break;
+        case IMAGE_SUBSYSTEM_WINDOWS_CUI:
+            printf("Windows Console");
+            break;
+        default:
+            printf("Unknown");
+            break;
+    }
+    printf(")\n");
+    printf("DllCharacteristics:       0x%04X\n", opt_header->DllCharacteristics);
+    printf("SizeOfStackReserve:       0x%016llX\n", (unsigned long long)opt_header->SizeOfStackReserve);
+    printf("SizeOfStackCommit:        0x%016llX\n", (unsigned long long)opt_header->SizeOfStackCommit);
+    printf("SizeOfHeapReserve:        0x%016llX\n", (unsigned long long)opt_header->SizeOfHeapReserve);
+    printf("SizeOfHeapCommit:         0x%016llX\n", (unsigned long long)opt_header->SizeOfHeapCommit);
+    printf("NumberOfRvaAndSizes:      %d\n", opt_header->NumberOfRvaAndSizes);
+    printf("\n");
+}
+
 int analyze_pe_file(const char* filename) {
     FILE* file;
     IMAGE_DOS_HEADER dos_header;
     IMAGE_NT_HEADERS32 nt_headers;
     DWORD section_offset;
+    long opt_hdr_pos;
+    WORD magic;
+    uint64_t image_base_val;
+    int is64;
     
     file = fopen(filename, "rb");
     if (!file) {
-        printf("ã‚¨ãƒ©ãƒ¼: ãƒ•ã‚¡ã‚¤ãƒ« '%s' ã‚’é–‹ã‘ã¾ã›ã‚“\n", filename);
+        printf("ƒGƒ‰[: ƒtƒ@ƒCƒ‹ '%s' ‚ğŠJ‚¯‚Ü‚¹‚ñ\n", filename);
         return 1;
     }
     
-    // DOS Headerèª­ã¿è¾¼ã¿
+    // DOS Header“Ç‚İ‚İ
     if (fread(&dos_header, sizeof(IMAGE_DOS_HEADER), 1, file) != 1) {
-        printf("ã‚¨ãƒ©ãƒ¼: DOS Headerã®èª­ã¿è¾¼ã¿ã«å¤±æ•—ã—ã¾ã—ãŸ\n");
+        printf("ƒGƒ‰[: DOS Header‚Ì“Ç‚İ‚İ‚É¸”s‚µ‚Ü‚µ‚½\n");
         fclose(file);
         return 1;
     }
     
-    // MZã‚·ã‚°ãƒãƒãƒ£ãƒã‚§ãƒƒã‚¯
+    // MZƒVƒOƒlƒ`ƒƒƒ`ƒF??ƒN
     if (dos_header.e_magic != IMAGE_DOS_SIGNATURE) {
-        printf("ã‚¨ãƒ©ãƒ¼: æœ‰åŠ¹ãªPEãƒ•ã‚¡ã‚¤ãƒ«ã§ã¯ã‚ã‚Šã¾ã›ã‚“ (MZã‚·ã‚°ãƒãƒãƒ£ãŒè¦‹ã¤ã‹ã‚Šã¾ã›ã‚“)\n");
+        printf("ƒGƒ‰[: —LŒø‚ÈPEƒtƒ@ƒCƒ‹‚Å‚Í‚ ‚è‚Ü‚¹‚ñ (MZƒVƒOƒlƒ`ƒƒ‚ªŒ©‚Â‚©‚è‚Ü‚¹‚ñ)\n");
         fclose(file);
         return 1;
     }
     
     print_dos_header(&dos_header);
     
-    // PE Headerã®ä½ç½®ã«ç§»å‹•
+    // PE Header‚ÌˆÊ’u‚ÉˆÚ??
     if (fseek(file, dos_header.e_lfanew, SEEK_SET) != 0) {
-        printf("ã‚¨ãƒ©ãƒ¼: PE Headerã®ä½ç½®ã«ç§»å‹•ã§ãã¾ã›ã‚“\n");
+        printf("ƒGƒ‰[: PE Header‚ÌˆÊ’u‚ÉˆÚ“®‚Å‚«‚Ü‚¹‚ñ\n");
         fclose(file);
         return 1;
     }
     
-    // NT Headersèª­ã¿è¾¼ã¿
+    // NT Headers“Ç‚İ‚İ
     if (fread(&nt_headers, sizeof(IMAGE_NT_HEADERS32), 1, file) != 1) {
-        printf("ã‚¨ãƒ©ãƒ¼: NT Headersã®èª­ã¿è¾¼ã¿ã«å¤±æ•—ã—ã¾ã—ãŸ\n");
+        printf("ƒGƒ‰[: NT Headers‚Ì“Ç‚İ‚İ‚É¸”s‚µ‚Ü‚µ‚½\n");
         fclose(file);
         return 1;
     }
     
-    // PEã‚·ã‚°ãƒãƒãƒ£ãƒã‚§ãƒƒã‚¯
+    // PEƒVƒOƒlƒ`ƒƒƒ`ƒF??ƒN
     if (nt_headers.Signature != IMAGE_NT_SIGNATURE) {
-        printf("ã‚¨ãƒ©ãƒ¼: æœ‰åŠ¹ãªPEã‚·ã‚°ãƒãƒãƒ£ãŒè¦‹ã¤ã‹ã‚Šã¾ã›ã‚“\n");
+        printf("ƒGƒ‰[: —LŒø‚ÈPEƒVƒOƒlƒ`ƒƒ‚ªŒ©‚Â‚©‚è‚Ü‚¹‚ñ\n");
         fclose(file);
         return 1;
     }
     
     print_nt_headers(&nt_headers);
     print_file_header(&nt_headers.FileHeader);
-    print_optional_header(&nt_headers.OptionalHeader);
-    print_data_directories(nt_headers.OptionalHeader.DataDirectory, 
-                          nt_headers.OptionalHeader.NumberOfRvaAndSizes);
+    // Optional Header‚ÌMagic‚Å32/64‚ğ”»’è
+    if (nt_headers.OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
+        // 64bit Optional Header ‚ğ“Ç‚İ‚ñ‚Å•\¦
+        long opt_hdr_pos_early = (long)dos_header.e_lfanew + (long)sizeof(DWORD) + (long)sizeof(IMAGE_FILE_HEADER);
+        if (fseek(file, opt_hdr_pos_early, SEEK_SET) != 0) {
+            printf("ƒGƒ‰[: Optional Header64‚ÌˆÊ’u‚ÉˆÚ“®‚Å‚«‚Ü‚¹‚ñ\n");
+            fclose(file);
+            return 1;
+        }
+        IMAGE_OPTIONAL_HEADER64 opt64_early;
+        if (fread(&opt64_early, sizeof(IMAGE_OPTIONAL_HEADER64), 1, file) != 1) {
+            printf("ƒGƒ‰[: Optional Header64‚Ì“Ç‚İ‚İ‚É¸”s‚µ‚Ü‚µ‚½\n");
+            fclose(file);
+            return 1;
+        }
+        print_optional_header64(&opt64_early);
+        print_data_directories(opt64_early.DataDirectory, opt64_early.NumberOfRvaAndSizes);
+    } else {
+        print_optional_header(&nt_headers.OptionalHeader);
+        print_data_directories(nt_headers.OptionalHeader.DataDirectory,
+                               nt_headers.OptionalHeader.NumberOfRvaAndSizes);
+    }
 
-    // ã‚»ã‚¯ã‚·ãƒ§ãƒ³ãƒ˜ãƒƒãƒ€ãƒ¼è¡¨ç¤º
+    // ƒZƒNƒVƒ‡ƒ“ƒwƒbƒ_[•\¦
     section_offset = dos_header.e_lfanew + sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER) + nt_headers.FileHeader.SizeOfOptionalHeader;
     print_section_headers(file, section_offset, nt_headers.FileHeader.NumberOfSections);
 
-    // .textã‚»ã‚¯ã‚·ãƒ§ãƒ³ ç°¡æ˜“é€†ã‚¢ã‚»ãƒ³ãƒ–ãƒ«
-    simple_disassemble_text_section(file, section_offset, nt_headers.FileHeader.NumberOfSections);
+    // Optional Header‚ÌMagic‚ğŠm”F‚µ‚ÄImageBase‚Æƒrƒbƒg”‚ğŒˆ’è
+    opt_hdr_pos = (long)dos_header.e_lfanew + (long)sizeof(DWORD) + (long)sizeof(IMAGE_FILE_HEADER);
+    if (fseek(file, opt_hdr_pos, SEEK_SET) != 0) {
+        printf("ƒGƒ‰[: Optional HeaderˆÊ’u‚ÉˆÚ“®‚Å‚«‚Ü‚¹‚ñ\n");
+        fclose(file);
+        return 1;
+    }
+    magic = 0;
+    if (fread(&magic, sizeof(WORD), 1, file) != 1) {
+        printf("ƒGƒ‰[: Optional Header‚ÌMagic“Ç‚İ‚İ‚É¸”s‚µ‚Ü‚µ‚½\n");
+        fclose(file);
+        return 1;
+    }
+    image_base_val = 0;
+    is64 = 0;
+    if (magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
+        // 64bit Optional Header ‚ğ“Ç‚İ‚ŞiImageBaseæ“¾‚Ì‚İj
+        if (fseek(file, opt_hdr_pos, SEEK_SET) != 0) {
+            printf("ƒGƒ‰[: Optional Header64‚ÌˆÊ’u‚ÉˆÚ“®‚Å‚«‚Ü‚¹‚ñ\n");
+            fclose(file);
+            return 1;
+        }
+        IMAGE_OPTIONAL_HEADER64 opt64;
+        if (fread(&opt64, sizeof(IMAGE_OPTIONAL_HEADER64), 1, file) != 1) {
+            printf("ƒGƒ‰[: Optional Header64‚Ì“Ç‚İ‚İ‚É¸”s‚µ‚Ü‚µ‚½\n");
+            fclose(file);
+            return 1;
+        }
+        image_base_val = (uint64_t)opt64.ImageBase;
+        is64 = 1;
+    } else {
+        // 32bit Optional HeaderiŠù‚Ént_headers‚É“Ç‚İ‚Ü‚ê‚Ä‚¢‚éj
+        image_base_val = (uint64_t)nt_headers.OptionalHeader.ImageBase;
+        is64 = 0;
+    }
 
-    // .textã‚»ã‚¯ã‚·ãƒ§ãƒ³é€†ã‚¢ã‚»ãƒ³ãƒ–ãƒ«
-    disassemble_text_section(file, section_offset, nt_headers.FileHeader.NumberOfSections);
+    // .text ƒZƒNƒVƒ‡ƒ“‹tƒAƒZƒ“ƒuƒ‹iCapstonej
+    disassemble_text_section_capstone(file, section_offset, (WORD)nt_headers.FileHeader.NumberOfSections, image_base_val, is64);
     
     fclose(file);
     return 0;
@@ -848,16 +469,16 @@ int main(int argc, char* argv[]) {
     printf("===================\n\n");
     
     if (argc != 2) {
-        printf("ä½¿ç”¨æ–¹æ³•: %s <PEãƒ•ã‚¡ã‚¤ãƒ«>\n", argv[0]);
-        printf("ä¾‹: %s notepad.exe\n", argv[0]);
+        printf("g—p•û??: %s <PEƒtƒ@ƒCƒ‹>\n", argv[0]);
+        printf("??: %s notepad.exe\n", argv[0]);
         return 1;
     }
     
-    printf("ãƒ•ã‚¡ã‚¤ãƒ«: %s\n\n", argv[1]);
+    printf("ƒtƒ@ƒCƒ‹: %s\n\n", argv[1]);
     
     int result = analyze_pe_file(argv[1]);
     if (result == 0) {
-        printf("PE Headerè§£æãŒå®Œäº†ã—ã¾ã—ãŸã€‚\n");
+        printf("PE Header‰ğÍ‚ªŠ®??‚µ‚Ü‚µ‚½??\n");
     }
     
     return result;

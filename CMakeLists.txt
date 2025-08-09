@@ -13,11 +13,31 @@ if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type (default Debug)" FORCE)
 endif()
 
-# Add compile options for debugging and UTF-8 support
-set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} /Zi /utf-8")
-set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /utf-8")
+# Add compile options (MSVC: Shift-JIS)
+if(MSVC)
+    # Use Shift-JIS (CP932) for source/execution charset
+    set(CMAKE_C_FLAGS_DEBUG   "${CMAKE_C_FLAGS_DEBUG} /Zi /source-charset:shift_jis /execution-charset:shift_jis")
+    set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /source-charset:shift_jis /execution-charset:shift_jis")
+else()
+    # Non-MSVC compilers: no-op (adjust as needed)
+endif()
+
+# Find Capstone package
+find_package(Capstone REQUIRED)
+
+set(CAPSTONE_INCLUDE_DIRS "C:/Program Files/capstone/include")
+set(CAPSTONE_LIBRARIES "C:/Program Files/capstone/lib/capstone.lib")
+
+# Include Capstone directories
+include_directories(${CAPSTONE_INCLUDE_DIRS})
 
 # Add the executable or library
 add_executable(tsudump main.c)
 # If tsudump is a library, you might want to use add_library instead
 # add_library(tsudump src1.c src2.c ...)
+
+# Link Capstone library
+target_link_libraries(tsudump ${CAPSTONE_LIBRARIES})
+
+message(STATUS "Capstone include directories: ${CAPSTONE_INCLUDE_DIRS}")
+message(STATUS "Capstone libraries: ${CAPSTONE_LIBRARIES}")

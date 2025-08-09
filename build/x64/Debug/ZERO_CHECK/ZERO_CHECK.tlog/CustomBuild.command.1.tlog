@@ -1,6 +1,6 @@
 ^C:\USERS\F-TSU\SRC\C\TSUDUMP-WIN\BUILD\CMAKEFILES\AB9D86E47B72BB58596DA7E6A3191E2C\GENERATE.STAMP.RULE
 setlocal
-"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -SC:/Users/f-tsu/src/C/tsudump-win -BC:/Users/f-tsu/src/C/tsudump-win/build --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/Users/f-tsu/src/C/tsudump-win/build/Tsudump.sln
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/Users/f-tsu/src/C/tsudump-win -BC:/Users/f-tsu/src/C/tsudump-win/build --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/Users/f-tsu/src/C/tsudump-win/build/Tsudump.sln
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
