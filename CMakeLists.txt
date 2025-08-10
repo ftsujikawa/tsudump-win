@@ -4,8 +4,8 @@ cmake_minimum_required(VERSION 3.10)
 # Project name and version
 project(Tsudump VERSION 1.0)
 
-# Specify the C standard (C90 for compatibility)
-set(CMAKE_C_STANDARD 90)
+# Specify the C standard (use C99 for mixed declarations)
+set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED True)
 
 # Set build type to Debug by default
@@ -15,7 +15,7 @@ endif()
 
 # Add compile options (MSVC: Shift-JIS)
 if(MSVC)
-    # Use Shift-JIS (CP932) for source/execution charset
+    # Use Shift-JIS for source/execution charset
     set(CMAKE_C_FLAGS_DEBUG   "${CMAKE_C_FLAGS_DEBUG} /Zi /source-charset:shift_jis /execution-charset:shift_jis")
     set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /source-charset:shift_jis /execution-charset:shift_jis")
 else()
@@ -41,3 +41,29 @@ target_link_libraries(tsudump ${CAPSTONE_LIBRARIES})
 
 message(STATUS "Capstone include directories: ${CAPSTONE_INCLUDE_DIRS}")
 message(STATUS "Capstone libraries: ${CAPSTONE_LIBRARIES}")
+
+# --- PDB generation settings (MSVC) ---
+if(MSVC)
+    # Ensure compiler emits debug info for Debug and RelWithDebInfo
+    target_compile_options(tsudump PRIVATE
+        /FS
+        $<$<CONFIG:Debug>:/Zi>
+        $<$<CONFIG:RelWithDebInfo>:/Zi>
+        $<$<CONFIG:Debug>:/Fd${CMAKE_BINARY_DIR}/$<CONFIG>/tsudump_cl.pdb>
+        $<$<CONFIG:RelWithDebInfo>:/Fd${CMAKE_BINARY_DIR}/$<CONFIG>/tsudump_cl.pdb>
+    )
+
+    # Instruct linker to produce PDB
+    target_link_options(tsudump PRIVATE
+        $<$<CONFIG:Debug>:/DEBUG:FULL>
+        $<$<CONFIG:RelWithDebInfo>:/DEBUG:FULL>
+    )
+
+    # Place PDB next to the built binary under the configuration folder
+    set_target_properties(tsudump PROPERTIES
+        PDB_NAME "tsudump"
+        PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>"
+        OUTPUT_NAME "tsudump"
+    )
+endif()
