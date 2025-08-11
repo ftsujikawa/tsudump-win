@@ -632,8 +632,9 @@ static void disassemble_text_section_capstone_with_symbols(
             }
 
             printf("=== .text section disassembly (Capstone + Symbols) ===\n");
-            start_va = image_base + (uint64_t)section.VirtualAddress;
-            printf("RVA: 0x%08X  Start VA: 0x%016" PRIx64 "  Size: 0x%08X  FileOffset: 0x%08X\n\n",
+            /* OBJ: アドレスはセクション先頭からのオフセット基準にする */
+            start_va = 0;
+            printf("RVA: 0x%08X  Start Off: 0x%016" PRIx64 "  Size: 0x%08X  FileOffset: 0x%08X\n\n",
                    section.VirtualAddress, (uint64_t)start_va, section.SizeOfRawData, section.PointerToRawData);
 
             // collect only .text symbols and compute their target VAs
@@ -641,7 +642,8 @@ static void disassemble_text_section_capstone_with_symbols(
                 size_t k;
                 for (k = 0; k < sym_count; k++) {
                 if (syms[k].section_number == (i + 1)) {
-                    uint64_t va = start_va + (uint64_t)syms[k].value;
+                    /* OBJのシンボル値はセクション先頭からのオフセット */
+                    uint64_t va = (uint64_t)syms[k].value;
                     if (label_count >= label_cap) {
                         size_t nc = label_cap ? label_cap * 2 : 32;
                         uint64_t* nva = (uint64_t*)realloc(label_vas, nc * sizeof(uint64_t));
@@ -683,7 +685,10 @@ static void disassemble_text_section_capstone_with_symbols(
                         }
                     }
                     // address
-                    printf("0x%016" PRIx64 ": ", (uint64_t)insn[j].address);
+                    /* 表示: オフセット + ファイルオフセット併記 */
+                    printf("0x%016" PRIx64 " (file+0x%08X): ",
+                           (uint64_t)insn[j].address,
+                           (unsigned)(section.PointerToRawData + ((uint64_t)insn[j].address - start_va)));
                     // instruction bytes
                     byte_count = (int)insn[j].size;
                     if (byte_count > 10) byte_count = 10;
@@ -715,8 +720,80 @@ static void disassemble_text_section_capstone_with_symbols(
                 printf("Disassembly failed\n");
             }
             cs_close(&handle);
-            printf("\n");
-            free(code); free(label_vas); free(label_names);
+            free(code);
+            free(label_vas);
+            free(label_names);
+            break; // .text を処理したら終了
+        }
+    }
+}
+
+// PE 用のシンプルな Capstone 逆アセンブル (.text セクション)
+// 先頭アドレスは image_base + section.VirtualAddress
+void disassemble_text_section_capstone(
+    FILE* file, DWORD section_offset, WORD number_of_sections, uint64_t image_base, int is_64bit) {
+    IMAGE_SECTION_HEADER section;
+    int i;
+    for (i = 0; i < number_of_sections; i++) {
+        if (fseek(file, section_offset + i * (long)sizeof(IMAGE_SECTION_HEADER), SEEK_SET) != 0)
+            return;
+        if (fread(&section, sizeof(IMAGE_SECTION_HEADER), 1, file) != 1)
+            return;
+        if (memcmp(section.Name, ".text", 5) == 0) {
+            unsigned char* code = NULL;
+            uint64_t start_va = image_base + (uint64_t)section.VirtualAddress;
+            csh handle;
+            cs_insn* insn = NULL;
+            cs_mode mode = is_64bit ? CS_MODE_64 : CS_MODE_32;
+            size_t count;
+
+            if (section.SizeOfRawData == 0) {
+                printf(".text の SizeOfRawData が 0 です\n");
+                return;
+            }
+            code = (unsigned char*)malloc(section.SizeOfRawData);
+            if (!code) {
+                fprintf(stderr, "メモリ確保に失敗しました\n");
+                return;
+            }
+            if (fseek(file, section.PointerToRawData, SEEK_SET) != 0 ||
+                fread(code, 1, section.SizeOfRawData, file) != section.SizeOfRawData) {
+                fprintf(stderr, ".text セクションの読み取りに失敗しました\n");
+                free(code);
+                return;
+            }
+
+            printf("=== .text section disassembly (Capstone) ===\n");
+            printf("RVA: 0x%08X  Start VA: 0x%016" PRIx64 "  Size: 0x%08X  FileOffset: 0x%08X\n\n",
+                   section.VirtualAddress, start_va, section.SizeOfRawData, section.PointerToRawData);
+
+            if (cs_open(CS_ARCH_X86, mode, &handle) != CS_ERR_OK) {
+                fprintf(stderr, "Capstone の初期化に失敗しました\n");
+                free(code);
+                return;
+            }
+            cs_option(handle, CS_OPT_DETAIL, CS_OPT_ON);
+
+            count = cs_disasm(handle, code, section.SizeOfRawData, start_va, 0, &insn);
+            if (count > 0) {
+                size_t j;
+                for (j = 0; j < count; j++) {
+                    int b, byte_count = (int)insn[j].size;
+                    if (byte_count > 10) byte_count = 10;
+                    printf("0x%016" PRIx64 ": ", (uint64_t)insn[j].address);
+                    for (b = 0; b < byte_count; b++) printf("%02X ", insn[j].bytes[b]);
+                    for (; b < 10; b++) printf("   ");
+                    if (insn[j].op_str && insn[j].op_str[0])
+                        printf("  %s %s\n", insn[j].mnemonic, insn[j].op_str);
+                    else
+                        printf("  %s\n", insn[j].mnemonic);
+                }
+                cs_free(insn, count);
+            } else {
+                printf("Disassembly failed\n");
+            }
+            cs_close(&handle);
+            free(code);
             break;
         }
     }
@@ -800,6 +877,41 @@ int analyze_obj_file(const char* filename) {
 
     // Section headers follow immediately after COFF header + SizeOfOptionalHeader
     section_offset = (DWORD)sizeof(IMAGE_FILE_HEADER) + coff_header.SizeOfOptionalHeader;
+    /* OBJ用: セクションテーブル範囲と先頭セクションのプローブ検証 */
+    {
+        long cur_size = 0;
+        long cur = ftell(file);
+        if (fseek(file, 0, SEEK_END) == 0) { cur_size = ftell(file); }
+        fseek(file, cur, SEEK_SET);
+        if ((long)section_offset < 0 || (long)section_offset + (long)coff_header.NumberOfSections * (long)sizeof(IMAGE_SECTION_HEADER) > cur_size) {
+            printf("[ERR] OBJ: セクションヘッダがファイルサイズを超えています (section_offset=0x%08X, count=%u, file_size=%ld)\n",
+                   (unsigned)section_offset, (unsigned)coff_header.NumberOfSections, cur_size);
+            fclose(file);
+            return 1;
+        }
+        {
+            IMAGE_SECTION_HEADER sec0;
+            if (fseek(file, (long)section_offset, SEEK_SET) != 0 || fread(&sec0, sizeof(IMAGE_SECTION_HEADER), 1, file) != 1) {
+                printf("[ERR] OBJ: 先頭セクションヘッダーの読み取りに失敗しました\n");
+                fclose(file);
+                return 1;
+            }
+            {
+                int all_zero = 1; int ni;
+                for (ni = 0; ni < 8; ni++) { if (sec0.Name[ni] != 0) { all_zero = 0; break; } }
+                if (all_zero) {
+                    printf("[WARN] OBJ: 先頭セクション名が全ゼロです（破損の可能性）\n");
+                }
+            }
+            if (sec0.PointerToRawData != 0 && sec0.SizeOfRawData != 0) {
+                long end_raw = (long)sec0.PointerToRawData + (long)sec0.SizeOfRawData;
+                if (end_raw < 0 || end_raw > cur_size) {
+                    printf("[WARN] OBJ: 先頭セクションのRaw範囲がファイル外です (ptr=0x%08X, size=0x%08X, file_size=%ld)\n",
+                           (unsigned)sec0.PointerToRawData, (unsigned)sec0.SizeOfRawData, cur_size);
+                }
+            }
+        }
+    }
     print_section_headers(file, section_offset, coff_header.NumberOfSections);
 
     // Dump and collect symbols
@@ -843,84 +955,6 @@ int analyze_obj_file(const char* filename) {
     free(syms);
     fclose(file);
     return 0;
-}
-
-void disassemble_text_section_capstone(FILE* file, DWORD section_offset, WORD number_of_sections, uint64_t image_base, int is_64bit) {
-    IMAGE_SECTION_HEADER section;
-    int i;
-    for (i = 0; i < number_of_sections; i++) {
-        fseek(file, section_offset + i * sizeof(IMAGE_SECTION_HEADER), SEEK_SET);
-        fread(&section, sizeof(IMAGE_SECTION_HEADER), 1, file);
-        if (memcmp(section.Name, ".text", 5) == 0) {
-            /* C89: move declarations to block head (MSVC C mode) */
-            unsigned char* code;
-            csh handle;
-            cs_insn* insn = NULL;
-            cs_err err;
-            cs_mode mode;
-            size_t count;
-
-            code = (unsigned char*)malloc(section.SizeOfRawData);
-            if (!code) {
-                fprintf(stderr, "Memory allocation failed\n");
-                return;
-            }
-            if (fseek(file, section.PointerToRawData, SEEK_SET) != 0 ||
-                fread(code, 1, section.SizeOfRawData, file) != section.SizeOfRawData) {
-                fprintf(stderr, "Failed to read data\n");
-                free(code);
-                return;
-            }
-
-            printf("=== .text section disassembly (Capstone) ===\n");
-            uint64_t start_va = image_base + (uint64_t)section.VirtualAddress;
-            printf("RVA: 0x%08X  Start VA: 0x%016" PRIx64 "  Size: 0x%08X  FileOffset: 0x%08X\n\n",
-                   section.VirtualAddress, (uint64_t)start_va, section.SizeOfRawData, section.PointerToRawData);
-
-            mode = is_64bit ? CS_MODE_64 : CS_MODE_32;
-            err = cs_open(CS_ARCH_X86, mode, &handle);
-            if (err != CS_ERR_OK) {
-                fprintf(stderr, "Capstone initialization failed: %d\n", err);
-                free(code);
-                return;
-            }
-            cs_option(handle, CS_OPT_DETAIL, CS_OPT_OFF);
-
-            count = cs_disasm(handle, code, section.SizeOfRawData,
-                                     start_va, 0, &insn);
-            if (count > 0) {
-                size_t j;
-                for (j = 0; j < count; j++) {
-                    // address
-                    printf("0x%016" PRIx64 ": ", (uint64_t)insn[j].address);
-                    // instruction bytes (max 10 bytes)
-                    int byte_count = (int)insn[j].size;
-                    int b;
-                    int p;
-                    if (byte_count > 10) byte_count = 10;
-                    for (b = 0; b < byte_count; b++) {
-                        printf("%02X ", insn[j].bytes[b]);
-                    }
-                    // pad to 10 bytes: 3*10=30 chars
-                    for (p = byte_count; p < 10; p++) {
-                        printf("   ");
-                    }
-                    // instruction
-                    if (insn[j].op_str && insn[j].op_str[0])
-                        printf("  %s %s\n", insn[j].mnemonic, insn[j].op_str);
-                    else
-                        printf("  %s\n", insn[j].mnemonic);
-                }
-                cs_free(insn, count);
-            } else {
-                printf("(no disassembly / failed)\n");
-            }
-            cs_close(&handle);
-            printf("\n");
-            free(code);
-            break;
-        }
-    }
 }
 
 void print_section_headers(FILE* file, DWORD section_offset, WORD number_of_sections) {
@@ -1353,6 +1387,49 @@ int analyze_pe_file(const char* filename) {
                (unsigned)section_offset, (unsigned)file_header.NumberOfSections, file_size);
         fclose(file);
         return 1;
+    }
+    /* 追加の信頼性チェック: Optional Header 終端一致と先頭セクションのプローブ */
+    {
+        long calc_end_of_opt = (long)dos_header.e_lfanew + (long)sizeof(DWORD) + (long)sizeof(IMAGE_FILE_HEADER) + (long)file_header.SizeOfOptionalHeader;
+        if (calc_end_of_opt != (long)section_offset) {
+            printf("[WARN] section_offset 不一致: calc_end_of_opt=0x%08lX, section_offset=0x%08X\n",
+                   calc_end_of_opt, (unsigned)section_offset);
+        }
+        {
+            IMAGE_SECTION_HEADER sec0;
+            int ok_probe = 1;
+            if (fseek(file, (long)section_offset, SEEK_SET) != 0) {
+                printf("[ERR] セクション先頭へのシークに失敗しました (0x%08X)\n", (unsigned)section_offset);
+                fclose(file);
+                return 1;
+            }
+            if (fread(&sec0, sizeof(IMAGE_SECTION_HEADER), 1, file) != 1) {
+                printf("[ERR] 先頭セクションヘッダーの読み取りに失敗しました\n");
+                fclose(file);
+                return 1;
+            }
+            {
+                int all_zero = 1; int ni;
+                for (ni = 0; ni < 8; ni++) { if (sec0.Name[ni] != 0) { all_zero = 0; break; } }
+                if (all_zero) {
+                    printf("[WARN] 先頭セクション名が全ゼロです（破損の可能性）\n");
+                }
+            }
+            if (sec0.PointerToRawData != 0 && sec0.SizeOfRawData != 0) {
+                long end_raw = (long)sec0.PointerToRawData + (long)sec0.SizeOfRawData;
+                if (end_raw < 0 || end_raw > file_size) {
+                    printf("[WARN] 先頭セクションのRaw範囲がファイル外です (ptr=0x%08X, size=0x%08X, file_size=%ld)\n",
+                           (unsigned)sec0.PointerToRawData, (unsigned)sec0.SizeOfRawData, file_size);
+                    ok_probe = 0;
+                }
+            }
+            /* print_section_headers は自身でfseekするため、ここでのファイル位置は影響しない */
+            if (!ok_probe) {
+                printf("[ERR] セクションヘッダーの妥当性検証に失敗しました\n");
+                fclose(file);
+                return 1;
+            }
+        }
     }
     print_section_headers(file, section_offset, file_header.NumberOfSections);
 
