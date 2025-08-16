@@ -8,10 +8,9 @@
 #include <inttypes.h>
 #include <capstone/capstone.h>
 
-// 実験的PDB詳細機能のフラグ（ビルド安定化のため一時的に無効化）
-#ifndef TSUDUMP_PDB_EXPERIMENTAL
-#define TSUDUMP_PDB_EXPERIMENTAL 0
-#endif
+// Experimental PDB detail feature flag (temporarily disabled for build stability)
+#undef TSUDUMP_PDB_EXPERIMENTAL
+#define TSUDUMP_PDB_EXPERIMENTAL 1
 
 // ===== forward declarations =====
 void print_file_header(IMAGE_FILE_HEADER* file_header);
@@ -24,8 +23,12 @@ int analyze_obj_file(const char* filename);
 int analyze_pdb_file(const char* filename);
 int analyze_pe_file(const char* filename);
 
-// 簡易バッファ検索（memmem 代替）
-static int buf_contains(const unsigned char* buf, size_t buf_len, const char* pat, size_t pat_len) {
+// DBI 詳細表示
+static void print_dbi_header(const unsigned char* dbi, uint32_t dbi_size);
+
+// Simple buffer search (memmem alternative)
+static int buf_contains(const unsigned char* buf, size_t buf_len, const char* pat, size_t pat_len)
+{
     size_t i;
     if (!buf || !pat || pat_len == 0 || buf_len < pat_len) return 0;
     for (i = 0; i + pat_len <= buf_len; i++) {
@@ -34,7 +37,24 @@ static int buf_contains(const unsigned char* buf, size_t buf_len, const char* pa
     return 0;
 }
 
-// DBIヘッダらしさを簡易チェック
+// Human-readable size (B, KiB, MiB, GiB)
+static void fmt_size_human(uint64_t bytes, char* out, size_t outsz)
+{
+    const char* unit = "B";
+    double val = (double)bytes;
+    if (bytes >= (1ull << 30)) { unit = "GiB"; val = val / (double)(1ull << 30); }
+    else if (bytes >= (1ull << 20)) { unit = "MiB"; val = val / (double)(1ull << 20); }
+    else if (bytes >= (1ull << 10)) { unit = "KiB"; val = val / (double)(1ull << 10); }
+    if (out && outsz) {
+        if (bytes < (1ull << 10)) {
+            snprintf(out, outsz, "%" PRIu64 " %s", bytes, unit);
+        } else {
+            snprintf(out, outsz, "%.2f %s", val, unit);
+        }
+    }
+}
+
+// Simple plausibility check for DBI header
 static int pdb_is_plausible_dbi_header(const unsigned char* dbi, uint32_t dbi_size, uint32_t num_streams) {
     if (!dbi || dbi_size < 64) return 0;
     int32_t verSig = 0; uint32_t verHdr=0, age=0; uint16_t gsi=0, psi=0, symrec=0;
@@ -44,19 +64,19 @@ static int pdb_is_plausible_dbi_header(const unsigned char* dbi, uint32_t dbi_si
     memcpy(&gsi,    dbi + 12, 2);
     memcpy(&psi,    dbi + 14, 2);
     memcpy(&symrec, dbi + 18, 2);
-    if (verSig != -1) return 0; // 0xFFFFFFFF であることが多い
-    // よくあるバージョン (V70)
+    if (verSig != -1) return 0; // often 0xFFFFFFFF
+    // common versions (V70)
     if (!(verHdr == 19990903u || verHdr == 19990307u || verHdr == 19980316u)) return 0;
-    // age は 0..1e6 程度を許容
+    // acceptable age range: 0..1e7
     if (age > 10000000u) return 0;
-    // ストリームインデックス範囲
+    // stream index range check
     if ((gsi != 0xFFFF && gsi >= num_streams) || (psi != 0xFFFF && psi >= num_streams)) return 0;
     if (symrec != 0xFFFF && symrec >= num_streams) return 0;
     return 1;
 }
 
-// 任意のストリームを復元するヘルパ
-// 成功時にヒープバッファを返す（呼び出し側で free）。失敗時は NULL。
+// Helper: rebuild arbitrary stream from directory
+// On success returns heap buffer (caller must free). On failure returns NULL.
 static unsigned char* pdb_rebuild_stream(
     FILE* f,
     const unsigned char* dir_buf,
@@ -71,11 +91,11 @@ static unsigned char* pdb_rebuild_stream(
     if (!f || !dir_buf || num_streams == 0) return NULL;
     if (target_index >= num_streams) return NULL;
 
-    const unsigned char* sizes_ptr = dir_buf + 4; // 先頭4バイトは num_streams
+    const unsigned char* sizes_ptr = dir_buf + 4; // first 4 bytes: num_streams
     if (dir_size < 4u + 4u * num_streams) return NULL;
     const unsigned char* pages_ptr = sizes_ptr + 4ull * num_streams;
 
-    // target の手前までの総ページ数を積算し、ページ配列内の開始位置を求める
+    // accumulate total pages before target to locate start within page array
     uint64_t total_pages_before = 0;
     uint32_t si;
     for (si = 0; si < num_streams; si++) {
@@ -83,15 +103,15 @@ static unsigned char* pdb_rebuild_stream(
         if (si == target_index) {
             if (ssz == 0xFFFFFFFFu || ssz == 0) return NULL;
             uint32_t spages = (ssz + page_size - 1) / page_size;
-            // ディレクトリ領域範囲チェック
+            // validate directory area bounds
             uint64_t need_dwords = total_pages_before + spages;
             uint64_t need_bytes = need_dwords * sizeof(uint32_t);
             uint64_t have_bytes = (dir_buf + dir_size) - pages_ptr;
             if (need_bytes > have_bytes) return NULL;
             const uint32_t* plist = (const uint32_t*)(pages_ptr) + (size_t)total_pages_before;
-            // ページ番号妥当性
+            // validate page numbers
             uint32_t k; for (k = 0; k < spages; k++) { if (plist[k] >= page_count) return NULL; }
-            // 復元
+            // rebuild
             unsigned char* buf = (unsigned char*)malloc(ssz);
             if (!buf) return NULL;
             uint32_t copied = 0;
@@ -217,20 +237,46 @@ int analyze_pdb_file(const char* filename) {
                 printf("=== 各ストリームサイズ ===\n");
                 {
                     uint32_t i; const unsigned char* p = dir_buf + 4;
+                    uint64_t total_bytes = 0; uint32_t non_empty = 0; uint32_t invalid = 0;
+                    printf("Stream            Bytes        Human\n");
+                    printf("---------------------------------------------\n");
                     for (i = 0; i < num_streams; i++) {
                         uint32_t sz; memcpy(&sz, p + 4ull * i, 4);
-                        if (sz == 0xFFFFFFFFu) printf("[%5u] <無効>\n", (unsigned)i);
-                        else printf("[%5u] %u バイト\n", (unsigned)i, (unsigned)sz);
+                        // Sanity: size must not exceed file capacity
+                        if (sz != 0xFFFFFFFFu) {
+                            uint64_t cap = (uint64_t)page_count * (uint64_t)page_size;
+                            if ((uint64_t)sz > cap) {
+                                printf("[WARN] Stream %u size too large: %u > %llu (capacity). Treating as invalid.\n",
+                                       (unsigned)i, (unsigned)sz, (unsigned long long)cap);
+                                sz = 0xFFFFFFFFu;
+                            }
+                        }
+                        if (sz == 0xFFFFFFFFu) {
+                            printf("[%5u] %14s %12s\n", (unsigned)i, "<無効>", "-");
+                            invalid++;
+                            continue;
+                        }
+                        if (sz > 0) { total_bytes += (uint64_t)sz; non_empty++; }
+                        {
+                            char h[32]; fmt_size_human((uint64_t)sz, h, sizeof(h));
+                            printf("[%5u] %14u %12s\n", (unsigned)i, (unsigned)sz, h);
+                        }
+                    }
+                    {
+                        char ht[32]; fmt_size_human(total_bytes, ht, sizeof(ht));
+                        printf("---------------------------------------------\n");
+                        printf("Total: %u streams (valid: %u, invalid: %u)\n", (unsigned)num_streams, (unsigned)(num_streams - invalid), (unsigned)invalid);
+                        printf("Non-empty streams: %u\n", (unsigned)non_empty);
+                        printf("Total bytes: %" PRIu64 " (%s)\n", (uint64_t)total_bytes, ht);
                     }
                 }
 
-                // 非空ストリームの先頭ダンプ（最大16本・各32バイト）
-#if TSUDUMP_PDB_EXPERIMENTAL
-                {
+                // Experimental: dump heads of non-empty streams (up to 16 streams, 32 bytes each)
+                if (TSUDUMP_PDB_EXPERIMENTAL) {
                     uint32_t dumped = 0;
                     const unsigned char* sizes_ptr = dir_buf + 4;
                     uint32_t si;
-                    printf("\n=== 非空ストリーム 先頭ダンプ (最大16本/各32B) ===\n");
+                    printf("\n=== Non-empty streams head dump (max 16 / 32B each) ===\n");
                     for (si = 0; si < num_streams && dumped < 16; si++) {
                         uint32_t ssz = 0; memcpy(&ssz, sizes_ptr + 4ull*si, 4);
                         if (ssz == 0xFFFFFFFFu || ssz == 0) continue;
@@ -250,8 +296,9 @@ int analyze_pdb_file(const char* filename) {
                         }
                     }
                 }
-#endif
-                // ---- PDBデバッグ情報（GUID/Age）抽出: ストリーム1 (PDB Info) を復元 ----
+
+                // ---- PDB debug info (GUID/Age): rebuild stream 1 (PDB Info) ----
+
                 if (num_streams > 1) {
                     const unsigned char* sizes_ptr = dir_buf + 4; // num_streamsの直後
                     const unsigned char* pages_ptr = sizes_ptr + 4ull * num_streams; // 各ストリームのページ番号配列群
@@ -265,45 +312,45 @@ int analyze_pdb_file(const char* filename) {
                         if (dir_size >= need_dir_bytes + need_pages_bytes * sizeof(uint32_t)) {
                             const uint32_t* page_list0 = (const uint32_t*)(pages_ptr);
                             const uint32_t* page_list1 = page_list0 + pages0;
-                            // ページ番号の妥当性
+                            // validate page numbers
                             int ok_pages = 1; uint32_t k;
                             for (k = 0; k < pages1; k++) { if (page_list1[k] >= page_count) { ok_pages = 0; break; } }
                             if (!ok_pages) {
-                                printf("[WARN] ストリーム1のページ番号が範囲外です\n");
+                                printf("[WARN] Stream 1 page index out of range\n");
                             } else {
-                                // ストリーム1（PDB Info）を復元
+                                // Rebuild Stream 1 (PDB Info)
                                 unsigned char* s1 = (unsigned char*)malloc(sz1);
                                 if (!s1) {
-                                    printf("エラー: メモリ確保に失敗しました (stream1)\n");
+                                    printf("Error: memory allocation failed (stream1)\n");
                                 } else {
                                     uint32_t copied = 0;
                                     for (k = 0; k < pages1 && copied < sz1; k++) {
                                         long off = (long)page_list1[k] * (long)page_size;
                                         uint32_t chunk = (sz1 - copied) < page_size ? (sz1 - copied) : page_size;
-                                        if (fseek(f, off, SEEK_SET) != 0) { printf("エラー: ストリーム1ページへのシークに失敗しました\n"); break; }
-                                        if (fread(s1 + copied, 1, chunk, f) != chunk) { printf("エラー: ストリーム1ページの読み取りに失敗しました\n"); break; }
+                                        if (fseek(f, off, SEEK_SET) != 0) { printf("Error: failed to seek Stream 1 page\n"); break; }
+                                        if (fread(s1 + copied, 1, chunk, f) != chunk) { printf("Error: failed to read Stream 1 page\n"); break; }
                                         copied += chunk;
                                     }
                                     if (copied == sz1) {
-                                        // PDB Info ヘッダ: [version(4)] [signature(4)] [age(4)] [guid(16)]
+                                        // PDB Info header: [version(4)] [signature(4)] [age(4)] [guid(16)]
                                         if (sz1 >= 4 + 4 + 4 + 16) {
                                             uint32_t ver, sig, age; GUID g;
                                             memcpy(&ver, s1 + 0, 4);
                                             memcpy(&sig, s1 + 4, 4);
                                             memcpy(&age, s1 + 8, 4);
                                             memcpy(&g,   s1 + 12, 16);
-                                            printf("=== PDB デバッグ情報 (Stream 1) ===\n");
+                                            printf("=== PDB Debug Info (Stream 1) ===\n");
                                             printf("Version=%u  Signature=%u  Age=%u\n", (unsigned)ver, (unsigned)sig, (unsigned)age);
                                             printf("GUID={%08lX-%04hX-%04hX-%02hhX%02hhX-%02hhX%02hhX%02hhX%02hhX%02hhX%02hhX}\n",
                                                    (unsigned long)g.Data1, g.Data2, g.Data3,
                                                    g.Data4[0], g.Data4[1], g.Data4[2], g.Data4[3], g.Data4[4], g.Data4[5], g.Data4[6], g.Data4[7]);
-                                            // 末尾付近に存在することがある PDB パス文字列（ASCII）を推定表示（推測的、境界安全）
+                                            // Optionally show trailing ASCII PDB path (best-effort, bounds-safe)
                                             {
                                                 size_t scan_start = (size_t)(4 + 4 + 4 + 16);
                                                 size_t i;
                                                 for (i = sz1; i > scan_start; i--) {
                                                     if (s1[i - 1] == '\0') {
-                                                        // 直前の連続ASCII printable領域を抽出
+                                                        // extract preceding ASCII printable region
                                                         size_t j = i - 1; size_t begin;
                                                         while (j > scan_start) {
                                                             unsigned char c = s1[j - 1];
@@ -318,18 +365,125 @@ int analyze_pdb_file(const char* filename) {
                                                 }
                                             }
                                         } else {
-                                            printf("[WARN] ストリーム1サイズが小さく、GUID/Ageを取得できません (size=%u)\n", (unsigned)sz1);
+                                            printf("[WARN] Stream 1 size is too small to get GUID/Age (size=%u)\n", (unsigned)sz1);
                                         }
                                     }
                                     free(s1);
                                 }
                             }
                         } else {
-                            printf("[WARN] ディレクトリ内のページ配列が不足している可能性があります\n");
+                            printf("[WARN] Not enough page array entries in directory\n");
                         }
                     } else {
-                        printf("[WARN] ストリーム1が無効または空のため、デバッグ情報を取得できません\n");
+                        printf("[WARN] Stream 1 is invalid or empty; cannot get debug info\n");
                     }
+                }
+
+                // ---- DBI (Debug Information) header: rebuild stream 3 and display basic fields ----
+                if (num_streams > 3) {
+                    // Pre-check size for stream 3 from directory
+                    const unsigned char* sizes_ptr = dir_buf + 4; // after num_streams
+                    uint32_t sz3 = 0xFFFFFFFFu;
+                    memcpy(&sz3, sizes_ptr + 4ull * 3, 4);
+                    if (sz3 == 0xFFFFFFFFu) {
+                        printf("[WARN] DBI stream (3) is marked invalid in directory\n");
+                    } else if (sz3 == 0) {
+                        printf("[INFO] DBI stream (3) is empty (size=0); skipping rebuild\n");
+                    } else {
+                        char h[32]; fmt_size_human((uint64_t)sz3, h, sizeof(h));
+                        uint32_t pages3 = (uint32_t)((sz3 + page_size - 1) / page_size);
+                        printf("[DBG] DBI stream (3) size=%u bytes (%s), pages=%u\n",
+                               (unsigned)sz3, h, (unsigned)pages3);
+                        uint32_t got_dbi = 0;
+                        unsigned char* dbi = pdb_rebuild_stream(
+                            f, dir_buf, dir_size, num_streams, page_size, page_count, 3, &got_dbi);
+                        if (dbi && got_dbi > 0) {
+                            if (pdb_is_plausible_dbi_header(dbi, got_dbi, num_streams)) {
+                                int32_t verSig = 0; uint32_t verHdr=0, age=0; uint16_t gsi=0, psi=0, symrec=0;
+                                memcpy(&verSig, dbi + 0, 4);
+                                memcpy(&verHdr, dbi + 4, 4);
+                                memcpy(&age,    dbi + 8, 4);
+                                memcpy(&gsi,    dbi + 12, 2);
+                                memcpy(&psi,    dbi + 14, 2);
+                                memcpy(&symrec, dbi + 18, 2);
+                                printf("=== DBI Header (Stream 3) ===\n");
+                                printf("verSig=%d verHdr=%u age=%u\n", (int)verSig, (unsigned)verHdr, (unsigned)age);
+                                printf("GSI stream=%u  PSI stream=%u  SymRec stream=%u\n",
+                                       (unsigned)gsi, (unsigned)psi, (unsigned)symrec);
+
+                                // Parse common DBI substream sizes (with bounds checks)
+                                if (got_dbi >= 60) {
+                                    // Offsets based on MS/LLVM DBI layout
+                                    int32_t szMod=0, szSecCon=0, szSecMap=0, szFileInfo=0, szTS=0, szDbgHdr=0, szEC=0;
+                                    uint16_t flags=0, machine=0;
+                                    // sizes block starts at offset 20
+                                    memcpy(&szMod,      dbi + 20, 4);
+                                    memcpy(&szSecCon,   dbi + 24, 4);
+                                    memcpy(&szSecMap,   dbi + 28, 4);
+                                    memcpy(&szFileInfo, dbi + 32, 4);
+                                    memcpy(&szTS,       dbi + 36, 4); // Type Server Index substream size
+                                    // 40: MFCTypeServerIndex or reserved (skip)
+                                    memcpy(&szDbgHdr,   dbi + 44, 4);
+                                    memcpy(&szEC,       dbi + 48, 4);
+                                    memcpy(&flags,      dbi + 52, 2);
+                                    memcpy(&machine,    dbi + 54, 2);
+
+                                    uint32_t off = 56; // substreams begin after 56 bytes header
+                                    // compute and print offsets, guarding negative sizes
+                                    typedef struct { const char* name; int32_t size; uint32_t start; } DbiPart;
+                                    DbiPart parts[6];
+                                    int pi = 0;
+                                    parts[pi].name = "ModInfo"; parts[pi].size = szMod; parts[pi].start = off; pi++;
+                                    if (szMod > 0) off += (uint32_t)szMod;
+                                    parts[pi].name = "SecContrib"; parts[pi].size = szSecCon; parts[pi].start = off; pi++;
+                                    if (szSecCon > 0) off += (uint32_t)szSecCon;
+                                    parts[pi].name = "SectionMap"; parts[pi].size = szSecMap; parts[pi].start = off; pi++;
+                                    if (szSecMap > 0) off += (uint32_t)szSecMap;
+                                    parts[pi].name = "FileInfo"; parts[pi].size = szFileInfo; parts[pi].start = off; pi++;
+                                    if (szFileInfo > 0) off += (uint32_t)szFileInfo;
+                                    parts[pi].name = "TypeServerIndex"; parts[pi].size = szTS; parts[pi].start = off; pi++;
+                                    if (szTS > 0) off += (uint32_t)szTS;
+                                    parts[pi].name = "ECInfo"; parts[pi].size = szEC; parts[pi].start = off; pi++;
+                                    if (szEC > 0) off += (uint32_t)szEC;
+
+                                    printf("Flags=0x%04X  Machine=0x%04X\n", (unsigned)flags, (unsigned)machine);
+                                    printf("--- DBI Substreams (size / offset) ---\n");
+                                    for (int i = 0; i < pi; i++) {
+                                        const char* n = parts[i].name; int32_t sz = parts[i].size; uint32_t st = parts[i].start;
+                                        if (sz < 0) {
+                                            printf("  %-16s size=%d (invalid)\n", n, sz);
+                                            continue;
+                                        }
+                                        uint32_t end = st + (uint32_t)sz;
+                                        int in_range = (st <= got_dbi && end <= got_dbi);
+                                        char h[32]; fmt_size_human((uint64_t)(uint32_t)sz, h, sizeof(h));
+                                        printf("  %-16s size=%u bytes (%s)  offset=%u %s\n",
+                                               n, (unsigned)(uint32_t)sz, h, (unsigned)st,
+                                               in_range ? "" : "[OUT-OF-RANGE]");
+                                    }
+
+                                    // Debug header region (if any)
+                                    if (szDbgHdr > 0) {
+                                        uint32_t dbg_off = off; uint32_t dbg_end = dbg_off + (uint32_t)szDbgHdr;
+                                        int ok = (dbg_off <= got_dbi && dbg_end <= got_dbi);
+                                        printf("  %-16s size=%u bytes  offset=%u %s\n",
+                                               "DbgHeader", (unsigned)(uint32_t)szDbgHdr, (unsigned)dbg_off,
+                                               ok ? "" : "[OUT-OF-RANGE]");
+                                    }
+                                } else {
+                                    printf("[WARN] DBI size too small for detailed parsing (got=%u)\n", (unsigned)got_dbi);
+                                }
+                            } else {
+                                printf("[WARN] DBI header not plausible (stream 3)\n");
+                            }
+                            free(dbi);
+                        } else {
+                            if (dbi) free(dbi);
+                            printf("[WARN] Failed to rebuild DBI stream (3) (sz3=%u)\n", (unsigned)sz3);
+                        }
+                    }
+                } else {
+                    printf("[WARN] DBI stream (3) not present\n");
                 }
 
                 printf("\n");
@@ -1486,26 +1640,87 @@ int analyze_pe_file(const char* filename) {
     return 0;
 }
 
+/* 簡易使用方法表示 */
+static void print_usage(const char* prog) {
+    printf("使い方:\n");
+    printf("  %s [--auto|--pe|--obj|--pdb] <ファイルパス>\n", prog);
+    printf("  %s --help\n", prog);
+    printf("\n");
+    printf("オプション:\n");
+    printf("  --auto  自動判定（デフォルト）。MZならPE、MSFならPDB、その他はOBJを試行\n");
+    printf("  --pe    PE解析を実行\n");
+    printf("  --obj   OBJ/COFF解析を実行\n");
+    printf("  --pdb   PDB/MSF解析を実行\n");
+    printf("  --help  このヘルプを表示\n");
+    printf("\n例:\n");
+    printf("  %s sample.exe\n", prog);
+    printf("  %s --pe sample.exe\n", prog);
+    printf("  %s --obj sample.obj\n", prog);
+    printf("  %s --pdb sample.pdb\n", prog);
+}
+
 int main(int argc, char* argv[]) {
-    printf("PE ヘッダ ダンプ ツール\n");
-    printf("========================\n\n");
-    
-    if (argc != 2) {
-        printf("使い方: %s <PE/OBJ ファイル>\n", argv[0]);
-        printf("例: %s notepad.exe\n", argv[0]);
-        printf("例: %s sample.obj\n", argv[0]);
+    printf("PE/OBJ/PDB 解析ツール\n");
+    printf("=====================\n\n");
+
+    /* 引数解析 */
+    enum { MODE_AUTO, MODE_PE, MODE_OBJ, MODE_PDB } mode = MODE_AUTO;
+    const char* filepath = NULL;
+
+    if (argc <= 1) {
+        print_usage(argv[0]);
         return 1;
     }
-    
-    printf("File: %s\n\n", argv[1]);
-    
-    // ファイル種別の自動判定を強化:
-    // 1) 先頭2バイトが 'M''Z' => PE
-    // 2) 先頭に "Microsoft C/C++ MSF" が含まれる => PDB/MSF (未対応)
-    // 3) 上記以外 => OBJ を試行
+
+    if (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "/?") == 0) {
+        print_usage(argv[0]);
+        return 0;
+    }
+
+    if (argv[1][0] == '-') {
+        if (strcmp(argv[1], "--pe") == 0) mode = MODE_PE;
+        else if (strcmp(argv[1], "--obj") == 0) mode = MODE_OBJ;
+        else if (strcmp(argv[1], "--pdb") == 0) mode = MODE_PDB;
+        else if (strcmp(argv[1], "--auto") == 0) mode = MODE_AUTO;
+        else {
+            printf("[ERR] 不明なオプション: %s\n\n", argv[1]);
+            print_usage(argv[0]);
+            return 1;
+        }
+        if (argc < 3) {
+            printf("[ERR] ファイルパスを指定してください\n\n");
+            print_usage(argv[0]);
+            return 1;
+        }
+        filepath = argv[2];
+    } else {
+        /* オプションなし: 自動判定で argv[1] を処理 */
+        mode = MODE_AUTO;
+        filepath = argv[1];
+    }
+
+    printf("File: %s\n\n", filepath);
+
     int result = 1;
+    if (mode == MODE_PE) {
+        result = analyze_pe_file(filepath);
+        if (result == 0) printf("PE Header analysis completed\n");
+        return result;
+    }
+    if (mode == MODE_OBJ) {
+        result = analyze_obj_file(filepath);
+        if (result == 0) printf("OBJ (COFF) analysis completed\n");
+        return result;
+    }
+    if (mode == MODE_PDB) {
+        result = analyze_pdb_file(filepath);
+        if (result == 0) printf("PDB (MSF) analysis completed\n");
+        return result;
+    }
+
+    /* MODE_AUTO: 既存の自動判定ロジックを踏襲 */
     {
-        FILE* f = fopen(argv[1], "rb");
+        FILE* f = fopen(filepath, "rb");
         if (!f) {
             printf("エラー: ファイルを開けません\n");
             return 1;
@@ -1514,26 +1729,21 @@ int main(int argc, char* argv[]) {
         size_t rd = fread(buf, 1, sizeof(buf), f);
         fclose(f);
         if (rd >= 2 && buf[0] == 'M' && buf[1] == 'Z') {
-            result = analyze_pe_file(argv[1]);
-            if (result == 0) {
-                printf("PE Header analysis completed\n");
-            }
+            result = analyze_pe_file(filepath);
+            if (result == 0) printf("PE Header analysis completed\n");
         } else if (rd >= 18 && buf_contains(buf, rd, "Microsoft C/C++ MSF", 18)) {
-            // PDB/MSF 形式
-            result = analyze_pdb_file(argv[1]);
-            if (result == 0) {
-                printf("PDB (MSF) analysis completed\n");
-            }
+            result = analyze_pdb_file(filepath);
+            if (result == 0) printf("PDB (MSF) analysis completed\n");
         } else {
-            result = analyze_obj_file(argv[1]);
+            result = analyze_obj_file(filepath);
             if (result == 0) {
                 printf("OBJ (COFF) analysis completed\n");
             } else {
-                // try PE again
-                result = analyze_pe_file(argv[1]);
+                /* 万一OBJ失敗ならPEを再試行（従来踏襲） */
+                result = analyze_pe_file(filepath);
             }
         }
     }
-    
+
     return result;
 }
